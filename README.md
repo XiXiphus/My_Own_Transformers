@@ -8,7 +8,7 @@ Use it as a concise reference implementation, a starting point for experiments, 
   <img src="https://github.com/user-attachments/assets/1d549173-450a-484a-af29-47152805800d" width="55%">
 </div>
 
-If you read Chinese, you can find additional notes here: [2025年还有人在 Attention Is All You Need](https://zhuanlan.zhihu.com/p/1901912964216358105).
+If you read Chinese, you can find additional notes here: [Transformer不完全指北](https://zhuanlan.zhihu.com/p/1901912964216358105).
 
 ---
 
