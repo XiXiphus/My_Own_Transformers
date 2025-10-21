@@ -1,224 +1,187 @@
-# My_Own_Transformers
+# My Own Transformers
 
+PyTorch re-implementation of the original Transformer architecture from *Attention Is All You Need*. The codebase stays close to the paper’s specification—stacked multi-head attention, position-wise feed-forward layers, sinusoidal positional encodings, residual connections, and the warmup-based learning rate schedule.
 
-This repository contains an implementation of the original Transformer paper ("Attention Is All You Need"). We will continuously update the code to match the details of the paper.
-
-Also, about this repository, I have a tiny blog about interesting details when reproducing the implementation, you can visit the site by click [2025年还有人在Attention Is All You Need - 嘻嘻福斯的文章 - 知乎](https://zhuanlan.zhihu.com/p/1901912964216358105)
+Use it as a concise reference implementation, a starting point for experiments, or an educational resource to understand how the model is wired end-to-end.
 
 <div align="center">
-  <img src="https://github.com/user-attachments/assets/1d549173-450a-484a-af29-47152805800d" width="50%">
+  <img src="https://github.com/user-attachments/assets/1d549173-450a-484a-af29-47152805800d" width="55%">
 </div>
 
-## Project Structure
+If you read Chinese, you can find additional notes here: [2025年还有人在 Attention Is All You Need](https://zhuanlan.zhihu.com/p/1901912964216358105).
+
+---
+
+## Contents
+
+- [My Own Transformers](#my-own-transformers)
+  - [Contents](#contents)
+  - [Highlights](#highlights)
+  - [Project Layout](#project-layout)
+  - [Setup](#setup)
+  - [Running Training](#running-training)
+    - [Built-in demo dataset](#built-in-demo-dataset)
+    - [Custom dataset](#custom-dataset)
+    - [Resume training](#resume-training)
+  - [Configuration](#configuration)
+  - [Data Preparation](#data-preparation)
+  - [Implementation Notes](#implementation-notes)
+  - [Development Tips](#development-tips)
+  - [References](#references)
+
+---
+
+## Highlights
+
+- Canonical encoder–decoder Transformer with 6 layers × 8 heads (configurable)
+- Inverse-sqrt warmup learning rate schedule via `TransformerOptimizer`
+- `tiktoken` tokenizer shared by encoder/decoder with BOS/EOS/PAD handling baked in
+- Data loader automatically prepares `(src, tgt_input, tgt_output)` tensors for teacher forcing
+- Character-level BLEU evaluation for train/val/test splits
+- Checkpoint management (model + optimizer state + metrics) and optional early stopping
+- Demo dataset bundled for quick sanity checks; easily swap in your own parallel corpus
+
+---
+
+## Project Layout
 
 ```
 src/
-├── models.py       # Transformer model implementation (Encoder, Decoder, etc.)
-├── optimizer.py    # Custom optimizer with learning rate scheduling
-├── utils.py        # Utility functions (masking, tokenization, evaluation, etc.)
-├── config.py       # Configuration management (loaded from args)
-├── args.py         # Command line argument parsing
-├── main.py         # Main script for training and evaluation
-└── data.py         # Data loading and preprocessing
+├── args.py         # CLI flags definition
+├── config.py       # Config wrapper around parsed args
+├── data.py         # Dataset, padding, shifting, dataloader helpers
+├── main.py         # Train/eval entry point
+├── models.py       # Encoder, decoder, attention blocks, FFNs, positional encoding
+├── optimizer.py    # Warmup-based optimizer wrapper
+└── utils.py        # Masks, tokenizer cache, BLEU score, demo data, helpers
 ```
 
-## Installation
+Dependencies: `torch`, `tiktoken`, `tqdm` (see `requirements.txt`).
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/your-username/My_Own_Transformers.git
-    cd My_Own_Transformers
-    ```
-2.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
+---
 
-## Usage
-
-### Data Preparation
-
-Training data should be tab-separated pairs of source and target language sentences, one pair per line. For example:
-
-```
-Learning is the best reward.    学习是旅途的意义。
-Knowledge is power.    知识就是力量。
-Practice makes perfect.    熟能生巧。
-```
-
-### Data Loading
-
-The project supports two ways to load data:
-
-1. **Using built-in demo data:** The code provides a set of English-Chinese translation pairs as demo data.
-2. **Custom data files:** You can specify your own translation data file path.
-
-The data loading module handles data through the `TranslationDataset` class and `create_dataloader` function in `data.py`, supporting batching and padding operations.
-
-### Model Training
-
-You have two options to train the model:
-
-1. **Using built-in demo data:**
-
-   Run the script directly without specifying a training file - the code will use the built-in demo translations:
-
-   ```bash
-   python src/main.py --use_demo_data
-   ```
-
-2. **Using custom training data:**
-
-   Specify your training data file with the `--train_file` parameter:
-
-   ```bash
-   python src/main.py --train_file path/to/your/train_data.txt
-   ```
-
-### Model Evaluation
-
-The model is evaluated using BLEU scores on the training and validation sets after each epoch. You can customize the evaluation process with the following options:
-
-*   `--val_file` (str, default: None): Path to the validation data file.
-*   `--save_best_only` (flag): Save only the best model based on validation BLEU score.
-*   `--patience` (int, default: 5): Number of epochs to wait for improvement in validation BLEU score before stopping training.
-
-### Resuming Training
-
-You can resume training from a checkpoint using the `--resume` parameter:
+## Setup
 
 ```bash
-python src/main.py --resume path/to/checkpoint.pt
+# Replace with your actual repository URL
+git clone https://github.com/XiXiphus/My_Own_Transformers
+cd My_Own_Transformers
+
+# optional virtualenv
+python -m venv .venv
+source .venv/bin/activate
+
+pip install -r requirements.txt
 ```
 
-### Full Example
+---
 
-Here is a full example with all parameters:
+## Running Training
+
+### Built-in demo dataset
+
+```bash
+python src/main.py --use_demo_data --device cpu
+```
+
+Runs a short training session on the toy English↔Chinese corpus and prints per-epoch BLEU scores.
+
+### Custom dataset
 
 ```bash
 python src/main.py \
-    --d_model 512 \
-    --num_heads 8 \
-    --num_layers 6 \
-    --batch_size 32 \
-    --num_epochs 10 \
-    --learning_rate 1.0 \
-    --warmup_steps 4000 \
-    --save_dir checkpoints \
-    --train_file data/train.txt \
-    --val_file data/val.txt \
+    --train_file data/train.tsv \
+    --val_file data/val.tsv \
+    --batch_size 64 \
+    --num_epochs 20 \
     --save_best_only \
-    --patience 5 \
-    --resume checkpoints/checkpoint_epoch_5.pt
+    --save_dir checkpoints/exp1
 ```
 
-### Command Line Arguments
+### Resume training
 
-**Model Parameters:**
-
-*   `--d_model` (int, default: 512): Model dimension.
-*   `--d_ff` (int, default: 2048): Feedforward network dimension.
-*   `--num_heads` (int, default: 8): Number of attention heads.
-*   `--num_layers` (int, default: 6): Number of encoder and decoder layers.
-*   `--dropout` (float, default: 0.1): Dropout rate.
-
-**Training Parameters:**
-
-*   `--batch_size` (int, default: 32): Batch size.
-*   `--num_epochs` (int, default: 10): Number of training epochs.
-*   `--learning_rate` (float, default: 1.0): Learning rate factor for the optimizer.
-*   `--warmup_steps` (int, default: 4000): Number of warmup steps for learning rate.
-*   `--device` (str, default: "cuda"): Training device ("cuda" or "cpu"). Defaults to "cpu" if CUDA is unavailable.
-*   `--save_dir` (str, default: "checkpoints"): Directory to save models.
-*   `--log_interval` (int, default: 100): Interval for logging (in batches).
-*   `--resume` (str, default: None): Path to checkpoint file for resuming training.
-*   `--save_best_only` (flag): Whether to save only the best model.
-*   `--patience` (int, default: 5): Patience for early stopping.
-
-**Data Parameters:**
-
-*   `--train_file` (str, default: None): Path to the training data file.
-*   `--val_file` (str, default: None): Path to the validation data file.
-*   `--max_seq_len` (int, default: 512): Maximum sequence length.
-*   `--use_demo_data` (flag): Whether to use demo data.
-
-## Implementation Details
-
-### Multi-Head Attention Mechanism
-
-The multi-head attention mechanism is implemented in the `MultiHeadAttention` class in `models.py`, including:
-
-1. **Self-Attention**: Used in the encoder for self-attention computation on the input sequence.
-2. **Masked Self-Attention**: Used in the decoder to ensure that decoding can only see the current and previous positions.
-3. **Encoder-Decoder Attention**: Used in the decoder to compute attention between the decoder's queries and the encoder's keys and values.
-
-Masking is optimized to ensure correct dimension matching in different attention types.
-
-### Optimizer and Learning Rate Scheduling
-
-The Transformer uses a custom learning rate scheduling strategy implemented in `optimizer.py`. The learning rate is calculated as:
-
-```
-lr = factor * (d_model^(-0.5) * min(step_num^(-0.5), step_num * warmup_steps^(-1.5)))
+```bash
+python src/main.py --resume checkpoints/exp1/checkpoint_epoch_10.pt
 ```
 
-This scheduling strategy increases the learning rate gradually at the beginning of training and then decreases it slowly, helping the model converge better.
+Each epoch: teacher-forced training, BLEU evaluation on train/val, optional early stopping, and checkpoint saving (`epoch`, metrics, weights, optimizer state).
 
-### BLEU Score Calculation
+If you run the demo workflow, the script evaluates on the held-out test set at the end.
 
-BLEU score calculation is implemented using the `calculate_bleu` and `evaluate_translations` functions in `utils.py` to evaluate translation quality. To better support Chinese, BLEU calculation is performed at the character level.
+---
 
-## Key Features
+## Configuration
 
-*   **Multi-Head Attention**: Complete implementation of the multi-head attention mechanism from the paper, supporting self-attention and encoder-decoder attention.
-*   **Positional Encoding**: Implemented using sine and cosine functions to provide positional information to the sequence.
-*   **Residual Connections**: Each sub-layer is followed by a residual connection and layer normalization to help train deep networks.
-*   **Custom Optimizer**: Implements the learning rate scheduling strategy from the original paper.
-*   **Masking Mechanism**: Implements padding and look-ahead masks to handle variable-length sequences and ensure autoregressive properties.
-*   **BLEU Evaluation**: Uses character-level BLEU scores to evaluate translation quality.
-*   **Checkpoint Management**: Saves and restores training state, supporting resumption of training.
-*   **Early Stopping**: Prevents overfitting by monitoring validation BLEU scores.
-*   **Data Loader**: Efficient data loading using PyTorch's Dataset and DataLoader.
-*   **Batching and Padding**: Automatically handles batching of variable-length sequences.
-*   **Device Adaptation**: Automatically detects available devices, supporting both CPU and CUDA training.
+All CLI arguments live in `src/args.py`. Common options:
 
-## Recent Updates
+| Argument                      | Description                                             | Default |
+| ----------------------------- | ------------------------------------------------------- | ------- |
+| `--d_model`                   | Embedding/hidden size                                   | 512     |
+| `--d_ff`                      | Feed-forward dimension                                  | 2048    |
+| `--num_heads`                 | Multi-head attention heads                              | 8       |
+| `--num_layers`                | Encoder & decoder layers                                | 6       |
+| `--dropout`                   | Dropout rate                                            | 0.1     |
+| `--batch_size`                | Minibatch size                                          | 32      |
+| `--num_epochs`                | Training epochs                                         | 10      |
+| `--learning_rate`             | Scale factor applied to scheduler                       | 1.0     |
+| `--warmup_steps`              | Warmup steps before inverse-sqrt decay                  | 4000    |
+| `--device`                    | `cuda`/`cpu` (auto-fallback to CPU if CUDA unavailable) | `cuda`  |
+| `--train_file` / `--val_file` | Tab-separated corpus paths                              | `None`  |
+| `--max_seq_len`               | Maximum tokenized length (includes BOS/EOS)             | 512     |
+| `--use_demo_data`             | Toggle demo dataset                                     | `False` |
+| `--save_best_only`            | Persist checkpoints that improve val BLEU               | `False` |
+| `--patience`                  | Early-stop patience (epochs)                            | 5       |
+| `--max_eval_batches`          | Max batches to evaluate (None = all)                    | `None`  |
 
-*   **Fixed Mask Dimension Issues**: Resolved issues with mask dimension mismatches in attention calculations.
-*   **Optimizer State Management**: Improved saving and loading of optimizer state.
-*   **Improved Evaluation Logic**: Enhanced the translation evaluation process with more detailed debugging information.
-*   **Enhanced Data Processing**: Improved data loading and preprocessing to better handle batching and padding.
-*   **Robust Error Handling**: Added more comprehensive exception handling to improve code robustness.
+Values are exposed via the global `config = Config()` instance in `src/config.py`.
 
-## Checkpoint Files
+---
 
-Checkpoint files contain the following information:
-*   `epoch`: Current training epoch
-*   `model_state_dict`: Model state dictionary
-*   `optimizer_state_dict`: Optimizer state dictionary
-*   `train_bleu`: Training set BLEU score
-*   `val_bleu`: Validation set BLEU score
-*   `best_bleu`: Best validation set BLEU score
+## Data Preparation
 
-## Special Token Handling
+Provide a UTF-8 TSV with `<source>	<target>` per line. Example:
 
-In this implementation, special tokens are handled using reserved IDs:
-*   `PAD_ID = 0`: Used for padding sequences to the same length.
-*   `BOS_ID = 1`: Used to indicate the beginning of a sequence.
-*   `EOS_ID = 2`: Used to indicate the end of a sequence.
-
-These IDs are used consistently across tokenization, decoding, masking, and padding processes to ensure the model correctly learns when to start, end, and pad sequences.
-
-## Citation
-
-If you find this implementation helpful, please consider citing the original paper:
-
-```bibtex
-@article{vaswani2017attention,
-  title={Attention is all you need},
-  author={Vaswani, Ashish and Shazeer, Noam and Parmar, Niki and Uszkoreit, Jakob and Jones, Llion and Gomez, Aidan N and Kaiser, {}ukasz and Polosukhin, Illia},
-  journal={Advances in neural information processing systems},
-  volume={30},
-  year={2017}
-}
 ```
+Learning is the best reward.	学习是旅途的意义。
+Knowledge is power.	知识就是力量。
+Practice makes perfect.	熟能生巧。
+```
+
+`TranslationDataset` handles:
+
+- Tokenization with `tiktoken` (`cl100k_base`)
+- Injecting `BOS/EOS`, truncating to `max_seq_len`
+- Padding batches via `torch.nn.utils.rnn.pad_sequence`
+- Producing `src`, `tgt_input` (left-shifted) and `tgt_output` (right-shifted)
+
+Swap in your own tokenizer by editing `utils.get_tokenizer` / `encode_text`.
+
+---
+
+## Implementation Notes
+
+- **Positional encoding**: sinusoidal tables registered as buffers (length 5000)
+- **Masking**: `create_masks` combines padding and look-ahead masks compatible with multi-head attention
+- **Residual + LayerNorm**: dropout before residual, post-residual layer norm (paper’s layout)
+- **Optimizer**: wraps Adam (`betas=(0.9, 0.98)`, `eps=1e-9`), stores `step_num`, exposes `state_dict`
+- **BLEU**: character-level metric for language-agnostic evaluation
+- **Device convenience**: `Transformer.device` property keeps tensors on the right accelerator/CPU
+
+---
+
+## Development Tips
+
+- `python -m compileall src` catches syntax errors quickly (used in health checks)
+- Add unit tests around masking/data shapes when extending the model (e.g., beam search)
+- Set `torch.manual_seed(...)` before constructing datasets/model for reproducibility
+- Adjust `--log_interval` or pipe stdout to your logger for longer runs
+
+---
+
+## References
+
+- Vaswani et al., [Attention Is All You Need](https://arxiv.org/abs/1706.03762)
+- Harvard NLP annotated Transformer walkthrough: <https://nlp.seas.harvard.edu/2018/04/03/attention.html>
+- `tiktoken` tokenizer: <https://github.com/openai/tiktoken>
+
+If this project helps you, consider starring the repo or citing the paper. Happy translating!

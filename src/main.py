@@ -10,9 +10,11 @@ from utils import (
     decode_text,
     evaluate_translations,
     get_demo_data,
-    PAD_ID,
     BOS_ID,
     EOS_ID,
+    create_masks,
+    create_padding_mask,
+    create_tgt_mask,
 )
 from data import create_dataloader, load_data_from_file
 
@@ -38,107 +40,99 @@ class Transformer(nn.Module):
             dropout=config.dropout,
             device=config.device,
         )
-        self.device = config.device
 
     def forward(self, src, tgt, src_mask=None, tgt_mask=None):
         enc_output = self.encoder(src, src_mask)
         dec_output = self.decoder(tgt, enc_output, src_mask, tgt_mask)
         return dec_output
 
-    def translate(self, src, tokenizer, max_length=50):
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    def translate(self, src, tokenizer, max_length=None):
         """
-        翻译单个句子。
-        参数：
-        - src: 源序列
-        - tokenizer: 分词器
-        - max_length: 最大生成长度
-        返回：
-        - 翻译结果
+        Translate a single sentence.
+        Parameters:
+        - src: Source sequence
+        - tokenizer: Tokenizer
+        - max_length: Maximum generation length (defaults to max_seq_len from config)
+        Returns:
+        - Translation result
         """
+        was_training = self.training
         self.eval()
         with torch.no_grad():
             bos_token = BOS_ID
             eos_token = EOS_ID
-            pad_token = PAD_ID
 
-            # 只翻译第一个句子（批次中的第一个）
+            decode_max_length = max_length or config.max_seq_len or 50
+            decode_max_length = max(2, decode_max_length)
+
+            # Only translate the first sentence (first in batch)
             single_src = src[0:1]
 
-            # 将源序列移到设备上
-            single_src = single_src.to(self.device)
+            # Move source sequence to device
+            device = self.device
+            single_src = single_src.to(device)
 
-            # 创建源序列掩码
-            src_mask = (
-                (single_src == pad_token).unsqueeze(1).unsqueeze(2).to(self.device)
-            )
+            # Create source sequence mask
+            src_mask = create_padding_mask(single_src)
 
-            # 编码源序列
+            # Encode source sequence
             enc_output = self.encoder(single_src, src_mask)
 
-            # 初始化目标序列 - 使用BOS token
-            tgt = torch.tensor([[bos_token]]).long().to(self.device)
+            # Initialize target sequence with BOS token
+            tgt = torch.tensor([[bos_token]], dtype=torch.long, device=device)
 
-            # 自回归生成
-            for _ in range(max_length):
-                # 创建目标序列掩码
-                tgt_len = tgt.size(1)
+            # Autoregressive generation
+            for _ in range(decode_max_length - 1):
+                tgt_mask = create_tgt_mask(tgt)
 
-                # 创建自回归掩码
-                look_ahead_mask = (
-                    torch.triu(torch.ones(tgt_len, tgt_len), diagonal=1)
-                    .bool()
-                    .to(self.device)
-                )
-                tgt_mask = ~look_ahead_mask  # 反转掩码（1表示注意，0表示忽略）
-                # print(f"tgt_mask: \n{tgt_mask}")
-                tgt_mask = tgt_mask.unsqueeze(0).unsqueeze(0)
-
-                # 解码
+                # Decode
                 output = self.decoder(tgt, enc_output, src_mask, tgt_mask)
 
-                # 获取下一个token
-                next_token = output[:, -1].argmax(dim=-1).unsqueeze(1)
+                # Get next token
+                next_token = output[:, -1].argmax(dim=-1, keepdim=True)
 
-                # 如果生成了EOS token，停止生成
+                # Append new token to target sequence
+                tgt = torch.cat([tgt, next_token], dim=1)
+
+                # Stop if EOS token is generated
                 if next_token.item() == eos_token:
                     break
 
-                # 将新token添加到目标序列
-                tgt = torch.cat([tgt, next_token], dim=1)
-
-                # 防止生成过长
-                if tgt.size(1) >= max_length:
-                    break
-
-            # 解码生成的序列
+            # Decode generated sequence
             translation = decode_text(tgt[0], tokenizer)
-            return translation
+        if was_training:
+            self.train()
+        return translation
 
 
-def train_step(model, optimizer, criterion, src, tgt, src_mask, tgt_mask):
+def train_step(model, optimizer, criterion, src, tgt_input, tgt_output):
     """
-    执行一个训练步骤。
-    参数：
-    - model: Transformer模型
-    - optimizer: 优化器
-    - criterion: 损失函数
-    - src: 源序列
-    - tgt: 目标序列
-    - src_mask: 源序列掩码
-    - tgt_mask: 目标序列掩码
-    返回：
-    - 损失值
+    Execute a single training step.
+    Parameters:
+    - model: Transformer model
+    - optimizer: Optimizer
+    - criterion: Loss function
+    - src: Source sequence
+    - tgt_input: Decoder input sequence
+    - tgt_output: Decoder output target
+    Returns:
+    - Loss value
     """
-    # 前向传播
-    output = model(src, tgt, src_mask, tgt_mask)
+    # Forward pass
+    src_mask, tgt_mask = create_masks(src, tgt_input)
 
-    # 计算损失
-    # 将输出和目标序列调整为适合计算损失的形式
+    output = model(src, tgt_input, src_mask, tgt_mask)
+
+    # Calculate loss
     output = output.view(-1, output.size(-1))
-    tgt = tgt.view(-1)
-    loss = criterion(output, tgt)
+    tgt_output = tgt_output.view(-1)
+    loss = criterion(output, tgt_output)
 
-    # 反向传播
+    # Backward pass
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
@@ -146,143 +140,103 @@ def train_step(model, optimizer, criterion, src, tgt, src_mask, tgt_mask):
     return loss.item()
 
 
-def evaluate(model, tokenizer, eval_data):
+def evaluate(model, tokenizer, eval_data, max_batches=None):
     """
-    评估模型性能。
-    参数：
-    - model: Transformer模型
-    - tokenizer: 分词器
-    - eval_data: 评估数据
-    返回：
-    - 平均BLEU评分
+    Evaluate model performance.
+    Parameters:
+    - model: Transformer model
+    - tokenizer: Tokenizer
+    - eval_data: Evaluation data
+    - max_batches: Maximum number of batches to evaluate
+    Returns:
+    - Average BLEU score
     """
+    if eval_data is None:
+        return 0.0
+
+    if max_batches is not None and max_batches <= 0:
+        return 0.0
+
+    was_training = model.training
     model.eval()
     references = []
     hypotheses = []
 
     with torch.no_grad():
-        # 只评估前5个样本以加快速度
-        for i, (src, tgt) in enumerate(eval_data):
-            if i >= 5:  # 限制评估的样本数量
+        for batch_idx, (src, _, tgt_output) in enumerate(eval_data):
+            if max_batches is not None and batch_idx >= max_batches:
                 break
 
-            # 打印数据形状，帮助调试
-            print(f"样本 {i+1}: Source shape: {src.shape}, Target shape: {tgt.shape}")
+            src = src.to(model.device)
+            batch_size = src.size(0)
 
-            try:
-                # 将数据移到设备上
-                src = src.to(model.device)
-                tgt = tgt.to(model.device)
+            for sample_idx in range(batch_size):
+                single_src = src[sample_idx : sample_idx + 1]
+                translation = model.translate(single_src, tokenizer)
+                reference = decode_text(tgt_output[sample_idx], tokenizer)
 
-                # 生成翻译
-                translation = model.translate(src, tokenizer)
-                print(f"生成的翻译: {translation}")
-
-                # 获取参考翻译
-                reference = decode_text(tgt[0], tokenizer)
-                print(f"参考翻译: {reference}")
-
-                # 记录翻译结果
                 references.append(reference)
                 hypotheses.append(translation)
-                print(f"成功翻译样本 {i+1}")
 
-            except Exception as e:
-                print(f"翻译样本 {i+1} 时出错: {e}")
-                import traceback
-
-                traceback.print_exc()
-                continue
-
-    # 如果没有成功的翻译，返回0
+    # If no successful translations, return 0
     if len(references) == 0:
-        print("警告: 没有成功的翻译")
         return 0.0
 
-    # 计算BLEU评分
-    print(f"参考翻译: {references}")
-    print(f"模型翻译: {hypotheses}")
     bleu_score = evaluate_translations(references, hypotheses)
+    if was_training:
+        model.train()
+
     return bleu_score
 
 
 def train(model, optimizer, criterion, train_loader, val_loader, tokenizer):
     """
-    训练模型。
-    参数：
-    - model: Transformer模型
-    - optimizer: 优化器
-    - criterion: 损失函数
-    - train_loader: 训练数据加载器
-    - val_loader: 验证数据加载器
-    - tokenizer: 分词器
+    Train the model.
+    Parameters:
+    - model: Transformer model
+    - optimizer: Optimizer
+    - criterion: Loss function
+    - train_loader: Training data loader
+    - val_loader: Validation data loader
+    - tokenizer: Tokenizer
     """
-    # 创建保存目录
+    # Create save directory
     if not os.path.exists(config.save_dir):
         os.makedirs(config.save_dir)
 
-    # 初始化最佳BLEU分数
+    # Initialize best BLEU score
     best_bleu = 0.0
     patience_counter = 0
 
-    # 尝试执行一个评估，确保一切正常
-    print("初始评估...")
+    # Try initial evaluation to ensure everything works
+    print("Initial evaluation...")
     try:
-        # 仅评估一个小批次
-        initial_src, initial_tgt = next(iter(train_loader))
+        # Evaluate on a small batch only
+        initial_src, initial_tgt_input, initial_tgt_output = next(iter(train_loader))
         initial_src = initial_src[:1].to(model.device)
-        initial_tgt = initial_tgt[:1].to(model.device)
+        initial_tgt_input = initial_tgt_input[:1].to(model.device)
+        src_mask, tgt_mask = create_masks(initial_src, initial_tgt_input)
 
-        # 创建掩码
-        src_mask = (initial_src != 0).unsqueeze(1).unsqueeze(2).to(model.device)
-        tgt_len = initial_tgt.size(1)
-        tgt_mask = (
-            torch.triu(torch.ones(tgt_len, tgt_len), diagonal=1).bool().to(model.device)
-        )
-        tgt_mask = ~tgt_mask
-        tgt_mask = tgt_mask.unsqueeze(0).unsqueeze(0)
-
-        # 尝试前向传播
+        # Try forward pass
         with torch.no_grad():
-            output = model(initial_src, initial_tgt, src_mask, tgt_mask)
-        print("初始评估成功!")
+            output = model(initial_src, initial_tgt_input, src_mask, tgt_mask)
+        print("Initial evaluation successful!")
     except Exception as e:
-        print(f"初始评估失败: {e}")
+        print(f"Initial evaluation failed: {e}")
         raise e
 
-    model.train()
     for epoch in tqdm(range(config.num_epochs), desc="Training"):
+        model.train()
         total_loss = 0
-        for i, (src, tgt) in enumerate(train_loader):
-            # 将数据移到设备上
+        for i, (src, tgt_input, tgt_output) in enumerate(train_loader):
             src = src.to(model.device)
-            tgt = tgt.to(model.device)
+            tgt_input = tgt_input.to(model.device)
+            tgt_output = tgt_output.to(model.device)
 
-            # 创建掩码
-            # 源序列掩码 [batch_size, 1, 1, src_len]
-            src_mask = (src != 0).unsqueeze(1).unsqueeze(2).to(model.device)
-
-            # 目标序列掩码 [batch_size, 1, tgt_len, tgt_len]
-            tgt_len = tgt.size(1)
-
-            # 创建前瞻掩码
-            tgt_mask = (
-                torch.triu(torch.ones(tgt_len, tgt_len), diagonal=1)
-                .bool()
-                .to(model.device)
-            )
-            tgt_mask = ~tgt_mask  # 反转掩码
-            tgt_mask = (
-                tgt_mask.unsqueeze(0)
-                .unsqueeze(0)
-                .expand(src.size(0), 1, tgt_len, tgt_len)
-            )
-
-            # 训练步骤
-            loss = train_step(model, optimizer, criterion, src, tgt, src_mask, tgt_mask)
+            loss = train_step(model, optimizer, criterion, src, tgt_input, tgt_output)
             total_loss += loss
 
-            # 打印训练信息
+            # Print training information
             if (i + 1) % config.log_interval == 0:
                 avg_loss = total_loss / config.log_interval
                 print(
@@ -292,27 +246,44 @@ def train(model, optimizer, criterion, train_loader, val_loader, tokenizer):
                 )
                 total_loss = 0
 
-        # 评估模型
-        print("评估训练集BLEU分数...")
-        train_bleu = evaluate(model, tokenizer, train_loader)
-        print("评估验证集BLEU分数...")
-        val_bleu = evaluate(model, tokenizer, val_loader)
-        print(
-            f"Epoch {epoch + 1}/{config.num_epochs}, "
-            f"Train BLEU: {train_bleu:.4f}, "
-            f"Val BLEU: {val_bleu:.4f}"
+        # Evaluate model
+        print("Evaluating training set BLEU score...")
+        train_bleu = evaluate(
+            model, tokenizer, train_loader, max_batches=config.max_eval_batches
         )
+        val_bleu = 0.0
+        if val_loader is not None:
+            print("Evaluating validation set BLEU score...")
+            val_bleu = evaluate(
+                model, tokenizer, val_loader, max_batches=config.max_eval_batches
+            )
+            print(
+                f"Epoch {epoch + 1}/{config.num_epochs}, "
+                f"Train BLEU: {train_bleu:.4f}, "
+                f"Val BLEU: {val_bleu:.4f}"
+            )
+        else:
+            print(
+                f"Epoch {epoch + 1}/{config.num_epochs}, "
+                f"Train BLEU: {train_bleu:.4f}"
+            )
 
-        # 保存模型
-        if not config.save_best_only or val_bleu > best_bleu:
-            # 更新最佳BLEU分数
-            if val_bleu > best_bleu:
-                best_bleu = val_bleu
-                patience_counter = 0
-            else:
-                patience_counter += 1
+        # Save model
+        if val_loader is None:
+            improved = True
+        else:
+            improved = val_bleu > best_bleu
 
-            # 保存检查点
+        if not config.save_best_only or improved:
+            # Update best BLEU score
+            if val_loader is not None:
+                if val_bleu > best_bleu:
+                    best_bleu = val_bleu
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+
+            # Save checkpoint
             checkpoint = {
                 "epoch": epoch + 1,
                 "model_state_dict": model.state_dict(),
@@ -326,22 +297,22 @@ def train(model, optimizer, criterion, train_loader, val_loader, tokenizer):
                 os.path.join(config.save_dir, f"checkpoint_epoch_{epoch + 1}.pt"),
             )
 
-        # 早停检查
-        if patience_counter >= config.patience:
+        # Early stopping check (only enabled when validation set is available)
+        if val_loader is not None and patience_counter >= config.patience:
             print(f"Early stopping triggered after {epoch + 1} epochs")
             break
 
 
 def load_checkpoint(model, optimizer, checkpoint_path):
     """
-    加载检查点。
-    参数：
-    - model: Transformer模型
-    - optimizer: 优化器
-    - checkpoint_path: 检查点文件路径
-    返回：
-    - 起始轮数
-    - 最佳BLEU分数
+    Load checkpoint.
+    Parameters:
+    - model: Transformer model
+    - optimizer: Optimizer
+    - checkpoint_path: Checkpoint file path
+    Returns:
+    - Starting epoch
+    - Best BLEU score
     """
     checkpoint = torch.load(checkpoint_path)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -350,15 +321,15 @@ def load_checkpoint(model, optimizer, checkpoint_path):
 
 
 def main():
-    # 打印配置信息
+    # Print configuration
     print(config)
 
-    # 获取分词器
+    # Get tokenizer
     tokenizer = get_tokenizer()
 
-    # 准备数据
+    # Prepare data
     if config.use_demo_data or not config.train_file:
-        print("使用示例数据")
+        print("Using demo data")
         train_data, val_data, test_data = get_demo_data(tokenizer)
         train_loader = create_dataloader(
             train_data, config.batch_size, config.max_seq_len
@@ -368,7 +339,7 @@ def main():
             test_data, config.batch_size, config.max_seq_len
         )
     else:
-        print(f"从文件加载训练数据: {config.train_file}")
+        print(f"Loading training data from file: {config.train_file}")
         train_loader = load_data_from_file(
             config.train_file, config.batch_size, config.max_seq_len
         )
@@ -379,10 +350,10 @@ def main():
         )
         test_loader = None
 
-    # 创建模型
+    # Create model
     model = Transformer(vocab_size=tokenizer.n_vocab).to(config.device)
 
-    # 创建优化器和损失函数
+    # Create optimizer and loss function
     optimizer = get_optimizer(
         model=model,
         model_size=config.d_model,
@@ -391,16 +362,18 @@ def main():
     )
     criterion = nn.CrossEntropyLoss(ignore_index=0)
 
-    # 如果指定了检查点，加载它
+    # Load checkpoint if specified
     if config.resume:
         load_checkpoint(model, optimizer, config.resume)
 
-    # 训练模型
+    # Train model
     train(model, optimizer, criterion, train_loader, val_loader, tokenizer)
 
-    # 如果使用了示例数据，在测试集上评估模型
+    # Evaluate on test set if using demo data
     if test_loader is not None:
-        test_bleu = evaluate(model, tokenizer, test_loader)
+        test_bleu = evaluate(
+            model, tokenizer, test_loader, max_batches=config.max_eval_batches
+        )
         print(f"Test BLEU: {test_bleu:.4f}")
 
 
